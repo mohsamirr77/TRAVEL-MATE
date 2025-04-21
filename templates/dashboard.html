@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+
+<div class="card p-4 shadow" style="max-width: 600px; margin: auto;">
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    
+
+    <div class="text-center">
+        {% if current_user.profile_picture %}
+            <img src="{{ url_for('static', filename='profile_pics/' ~ user.profile_picture) }}" class="rounded-circle mb-3" style="width: 120px; height: 120px;">
+        {% else %}
+            <img src="{{ url_for('static', filename='profile_pics/default.jpg') }}" class="rounded-circle mb-3" style="width: 120px; height: 120px;">
+        {% endif %}
+        <h4>{{ current_user.name }}</h4>
+        <p class="text-muted">{{ current_user.email }}</p>
+    </div>
+    <hr>
+    <p><strong>Phone:</strong> {{ current_user.phone }}</p>
+    <p><strong>Address:</strong> {{ current_user.address }}</p>
+    <p><strong>Blood Group:</strong> {{ current_user.blood_group }}</p>
+    <p><strong>NID:</strong> {{ current_user.nid }}</p>
+    <p><strong>Preferred Travel Mode:</strong> {{ current_user.preferred_mode }}</p>
+    <a href="{{ url_for('profile') }}" class="btn btn-outline-primary w-100 mt-3">Edit Profile</a>
+    <a href="{{ url_for('preferences') }}" class="btn btn-outline-secondary w-100 mt-2">Travel Preferences</a>
+    <a href="{{ url_for('logout') }}" class="btn btn-outline-danger w-100 mt-2">Logout</a>
+</div>
+
+{% endblock %}

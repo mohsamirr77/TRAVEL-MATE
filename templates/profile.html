@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Profile{% endblock %}
+{% block content %}
+
+
+<div class="card mx-auto p-4 shadow-lg animate__animated animate__fadeInUp" style="max-width: 520px; border-radius: 20px;">
+    <h3 class="mb-4 text-center text-primary">Update Your Profile</h3>
+    <form method="POST" enctype="multipart/form-data">
+        <div class="mb-3">
+            <label class="form-label">Profile Picture</label><br>
+            {% if current_user.profile_picture %}
+                <img src="{{ url_for('static', filename='profile_pics/' ~ current_user.profile_picture) }}" class="rounded-circle mb-3" style="width: 120px; height: 120px;"><br>
+            {% endif %}
+            <input type="file" name="profile_picture" class="form-control">
+        </div>
+        <div class="mb-3">
+            <label class="form-label">Name</label>
+            <input type="text" name="name" class="form-control" value="{{ current_user.name }}" required>
+        </div>
+        <div class="mb-3">
+            <label class="form-label">Email</label>
+            <input type="email" name="email" class="form-control" value="{{ current_user.email }}" required>
+        </div>
+        <div class="mb-3">
+            <label class="form-label">Phone</label>
+            <input type="text" name="phone" class="form-control" value="{{ current_user.phone }}">
+        </div>
+        <div class="mb-3">
+            <label class="form-label">Preferred Travel Mode</label>
+            <select name="preferred_mode" class="form-select">
+                <option value="">Select Mode</option>
+                <option value="car" {% if current_user.preferred_mode == 'car' %}selected{% endif %}>Car</option>
+                <option value="bike" {% if current_user.preferred_mode == 'bike' %}selected{% endif %}>Bike</option>
+                <option value="public transport" {% if current_user.preferred_mode == 'public transport' %}selected{% endif %}>Public Transport</option>
+                <option value="rideshare" {% if current_user.preferred_mode == 'rideshare' %}selected{% endif %}>Rideshare</option>
+            </select>
+        </div>
+        <div class="mb-3">
+            <label class="form-label">Address</label>
+            <input type="text" name="address" class="form-control" value="{{ current_user.address }}">
+        </div>
+        
+        <div class="mb-3">
+            <label class="form-label">Blood Group</label>
+            <input type="text" name="blood_group" class="form-control" value="{{ current_user.blood_group }}">
+        </div>
+        
+        <div class="mb-3">
+            <label class="form-label">NID</label>
+            <input type="text" name="nid" class="form-control" value="{{ current_user.nid }}">
+        </div>
+        <div class="mb-3">
+            <label class="form-label">Upload NID / Identity Document</label>
+            <input type="file" name="id_document" class="form-control">
+        </div>
+        
+        <button type="submit" class="btn btn-primary w-100 mt-2">Update</button>
+    </form>
+</div>
+
+{% endblock %}
+

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Travel Preferences{% endblock %}
+{% block content %}
+
+<div class="card p-4 shadow" style="max-width: 600px; margin: auto;">
+    <h3 class="mb-4 text-center">Travel Preferences & Safety Settings</h3>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <form method="POST">
+        <div class="mb-3">
+            <label for="home_location" class="form-label">Home Location</label>
+            <input type="text" name="home_location" class="form-control" value="{{ user.home_location or '' }}">
+        </div>
+        <div class="mb-3">
+            <label for="frequent_routes" class="form-label">Frequent Routes</label>
+            <textarea name="frequent_routes" class="form-control" rows="3">{{ user.frequent_routes or '' }}</textarea>
+        </div>
+        <div class="mb-3">
+            <label for="safety_preference" class="form-label">Safety Preference</label>
+            <select name="safety_preference" class="form-select">
+                <option value="none" {% if user.safety_preference == 'none' %}selected{% endif %}>None</option>
+                <option value="female_only" {% if user.safety_preference == 'female_only' %}selected{% endif %}>Female-only Rides</option>
+                <option value="verified_drivers" {% if user.safety_preference == 'verified_drivers' %}selected{% endif %}>Verified Drivers Only</option>
+                <option value="both" {% if user.safety_preference == 'both' %}selected{% endif %}>Female-only & Verified Drivers</option>
+            </select>
+        </div>
+        <button type="submit" class="btn btn-primary w-100">Save Preferences</button>
+    </form>
+</div>
+
+{% endblock %}

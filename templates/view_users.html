@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}All Users{% endblock %}
+{% block content %}
+<div class="container mt-4">
+    <h3 class="text-center mb-4">All Registered Users</h3>
+
+    <table class="table table-bordered table-striped table-hover">
+        <thead class="table-dark">
+            <tr>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Phone</th>
+                <th>Address</th>
+                <th>NID</th>
+                <th>NID Image</th>
+                <th>Email Verified</th>
+                <th>Account Approved</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td>{{ user.name }}</td>
+                <td>{{ user.email }}</td>
+                <td>{{ user.phone or 'N/A' }}</td>
+                <td>{{ user.address or 'N/A' }}</td>
+                <td>{{ user.nid or 'N/A' }}</td>
+
+                <td>
+                    {% if user.id_document %}
+                    <!-- Thumbnail triggers modal -->
+                    <img src="{{ url_for('static', filename='profile_pics/' ~ user.id_document) }}"
+                         alt="NID Thumbnail"
+                         class="img-thumbnail"
+                         style="height: 50px; cursor: pointer;"
+                         data-bs-toggle="modal"
+                         data-bs-target="#nidModal{{ user.id }}">
+                    
+                    <!-- Modal -->
+                    <div class="modal fade" id="nidModal{{ user.id }}" tabindex="-1" aria-labelledby="nidModalLabel{{ user.id }}" aria-hidden="true">
+                      <div class="modal-dialog modal-dialog-centered modal-lg">
+                        <div class="modal-content">
+                          <div class="modal-header">
+                            <h5 class="modal-title" id="nidModalLabel{{ user.id }}">NID Image - {{ user.name }}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                          </div>
+                          <div class="modal-body text-center">
+                            <img src="{{ url_for('static', filename='profile_pics/' ~ user.id_document) }}"
+                                 alt="Full NID Image"
+                                 class="img-fluid rounded">
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    {% else %}
+                    N/A
+                    {% endif %}
+                </td>
+
+                <td>{{ 'Yes' if user.verified else 'No' }}</td>
+                <td>{{ 'Yes' if user.is_approved else 'No' }}</td>
+                <td>
+                    {% if not user.verified %}
+                    <form action="{{ url_for('verify_user', user_id=user.id) }}" method="POST" style="display:inline;">
+                        <button type="submit" class="btn btn-sm btn-success mb-1">Verify</button>
+                    </form>
+                    {% endif %}
+                    
+                    {% if not user.is_approved %}
+                    <a href="{{ url_for('approve_user', user_id=user.id) }}" class="btn btn-sm btn-primary mb-1">Approve</a>
+                    {% else %}
+                    <a href="{{ url_for('restrict_user', user_id=user.id) }}" class="btn btn-sm btn-warning mb-1">Restrict</a>
+                    {% endif %}
+
+                    <a href="{{ url_for('delete_user', user_id=user.id) }}" class="btn btn-sm btn-danger mb-1">Delete</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

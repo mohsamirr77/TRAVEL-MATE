@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Login - Ride Share{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-5">
+        <div class="card p-4 shadow animate__animated animate__fadeIn">
+            <h2 class="text-center mb-4 text-primary">Login to Ride Share</h2>
+            <form method="POST">
+                <div class="mb-3">
+                    <label for="email" class="form-label">Email address</label>
+                    <input type="email" class="form-control" name="email" placeholder="Enter your email" required>
+                </div>
+                <div class="mb-3">
+                    <label for="password" class="form-label">Password</label>
+                    <input type="password" class="form-control" name="password" placeholder="Enter your password" required>
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary btn-lg">Login</button>
+                </div>
+            </form>
+            <div class="text-center mt-3">
+                <small class="text-muted">Don't have an account? <a href="/register">Register here</a></small>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

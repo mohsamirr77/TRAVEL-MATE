@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Admin Dashboard{% endblock %}
+{% block content %}
+<div class="container mt-5">
+    <h3 class="text-center mb-4">Admin Dashboard</h3>
+
+    <div class="text-center">
+        <a href="{{ url_for('view_users') }}" class="btn btn-primary btn-lg">
+            View All Users
+        </a>
+    </div>
+</div>
+{% endblock %}
