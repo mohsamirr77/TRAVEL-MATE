@@ -1,6 +1,7 @@
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import UserMixin
 from datetime import datetime
+from sqlalchemy import Float
 
 db = SQLAlchemy()
 
@@ -21,7 +22,9 @@ class User(UserMixin, db.Model):
     home_location = db.Column(db.String(255))
     frequent_routes = db.Column(db.Text)
     safety_preference = db.Column(db.String(100))
-
+    average_rating = db.Column(db.Float, default=0.0)
+    total_ratings = db.Column(db.Integer, default=0)
+    gender = db.Column(db.String(10))  # male, female, other
 
 class Admin(UserMixin, db.Model):
     __tablename__ = 'admins'
@@ -47,6 +50,16 @@ class RidePost(db.Model):
     estimated_cost = db.Column(db.Float)
     description = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # In RidePost model
+    gender_preference = db.Column(db.String(20), default='any')  # any, female_only
+    require_verification = db.Column(db.Boolean, default=False)  # Require verified users only
+    from_lat = db.Column(Float)
+    from_lng = db.Column(Float)
+    to_lat = db.Column(Float)
+    to_lng = db.Column(Float)
+    ride_requests = db.relationship('RideRequest', backref='ride_post', cascade='all, delete-orphan')
+    
+
 
 
 
@@ -73,11 +86,13 @@ class Feedback(db.Model):
 class Notification(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     recipient_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    recipient_type = db.Column(db.String(10), default='user')  # 'user' or 'admin'S
     sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     ride_id = db.Column(db.Integer, db.ForeignKey('ride_post.id'), nullable=True)  # ✅ Link to RidePost
     message = db.Column(db.Text)
     is_read = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
 
     recipient = db.relationship('User', foreign_keys=[recipient_id])
     sender = db.relationship('User', foreign_keys=[sender_id])
@@ -116,3 +131,20 @@ class Message(db.Model):
     content = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
     is_read = db.Column(db.Boolean, default=False)
+
+class DeletedRide(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    original_ride_id = db.Column(db.Integer, nullable=False)
+    creator_id = db.Column(db.Integer, nullable=False)
+    origin = db.Column(db.String(100))
+    destination = db.Column(db.String(100))
+    travel_date = db.Column(db.Date)
+    travel_time = db.Column(db.Time)
+    fare = db.Column(db.Float)
+    seats = db.Column(db.Integer)
+    deleted_at = db.Column(db.DateTime, default=datetime.utcnow)
+    deleted_by_admin_id = db.Column(db.Integer)  # optional
+
+    # Optional: relationship back to creator
+    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    creator = db.relationship('User', backref='deleted_rides')

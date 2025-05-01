@@ -1,3 +1,5 @@
+import eventlet
+eventlet.monkey_patch()
 from flask import Flask, render_template, request, redirect, url_for, flash,abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
@@ -5,17 +7,19 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from models import db, User, Admin
 import config
 from flask import Flask, request, jsonify, session
-from models import db, RidePost, User, RideRequest, Feedback, Notification, ChatMessage, Chat, Message
+from models import db, RidePost, User, RideRequest, Feedback, Notification, ChatMessage, Chat, Message, DeletedRide
 from datetime import time
 import os
 from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta, UTC
 from sqlalchemy import or_, and_
 from flask_migrate import Migrate
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
 
 app = Flask(__name__)
 app.config.from_object(config)
+socketio = SocketIO(app)
 
 db.init_app(app)
 migrate = Migrate(app, db)
@@ -41,7 +45,14 @@ def load_user(user_id):
 
 @app.route('/')
 def home():
-    return render_template('home.html')
+    total_users = db.session.query(User).count()
+    total_rides = db.session.query(RidePost).count()
+    active_rides = db.session.query(RidePost).filter(RidePost.travel_time >= datetime.utcnow()).count()
+    
+    return render_template('home.html', total_users=total_users, total_rides=total_rides, active_rides=active_rides)
+@app.context_processor
+def inject_now():
+    return {'now': datetime.utcnow}
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -122,13 +133,19 @@ def give_feedback(ride_id):
 
     if request.method == 'POST':
         comment = request.form.get('comment')
-        rating = request.form.get('rating')  # assume rating is optional
+        rating = request.form.get('rating')
 
         if not comment:
             flash('Feedback cannot be empty.', 'danger')
             return redirect(request.url)
 
-        # Save feedback (example Feedback model)
+        if not rating:
+            flash('Please provide a rating.', 'danger')
+            return redirect(request.url)
+
+        rating = int(rating)
+
+        # Save feedback
         feedback = Feedback(
             ride_id=ride.id,
             user_id=current_user.id,
@@ -136,12 +153,29 @@ def give_feedback(ride_id):
             rating=rating
         )
         db.session.add(feedback)
+
+        # Update ride owner's average rating
+        ride_owner = ride.creator
+        if ride_owner:
+            # New average rating calculation
+            current_avg = ride_owner.average_rating or 0.0
+            current_total = ride_owner.total_ratings or 0
+
+            total_rating = current_avg * current_total
+            total_rating += rating
+            ride_owner.total_ratings = (ride_owner.total_ratings or 0) + 1
+
+            ride_owner.average_rating = total_rating / ride_owner.total_ratings
+
+            db.session.add(ride_owner)
+
         db.session.commit()
 
-        flash('Thank you for your feedback!', 'success')
+        flash('Thank you for your feedback! It will help us in enhancing user experience!', 'success')
         return redirect(url_for('dashboard'))
 
     return render_template('give_feedback.html', ride=ride)
+
 
 @app.route('/past-journeys')
 @login_required
@@ -208,6 +242,8 @@ def preferences():
         return redirect(url_for('preferences'))
     
     return render_template('preferences.html', user=current_user)
+
+
 @app.route('/create_ride', methods=['GET', 'POST'])
 @login_required
 def create_ride():
@@ -219,7 +255,15 @@ def create_ride():
         seats_available = request.form['seats_available']
         fare_type = request.form['fare_type']
         estimated_cost = request.form.get('estimated_cost') or None
+        gender_preference = request.form.get('gender_preference') or 'any'
+        require_verification = request.form.get('require_verification') == 'on'
         description = request.form.get('description')
+        from_lat = request.form.get('from_lat')
+        from_lng = request.form.get('from_lng')
+        to_lat = request.form.get('to_lat')
+        to_lng = request.form.get('to_lng')
+
+        
 
         ride = RidePost(
             creator_id=current_user.id,
@@ -230,7 +274,13 @@ def create_ride():
             seats_available=int(seats_available),
             fare_type=fare_type,
             estimated_cost=float(estimated_cost) if estimated_cost else None,
-            description=description
+            description=description,
+            gender_preference=gender_preference,
+            require_verification=require_verification,
+            from_lat=float(from_lat),
+            from_lng=float(from_lng),
+            to_lat=float(to_lat),
+            to_lng=float(to_lng)
         )
         db.session.add(ride)
         db.session.commit()
@@ -238,6 +288,7 @@ def create_ride():
         return redirect(url_for('dashboard'))
 
     return render_template('create_ride.html')
+
 
 @app.route('/ride_posts', methods=['GET'])
 @login_required
@@ -249,6 +300,8 @@ def ride_posts():
     to_location = request.args.get('to_location')
     fare_type = request.args.get('fare_type')
     travel_date = request.args.get('travel_date')
+
+    today = datetime.now(UTC).date()
 
     if from_location:
         query = query.filter(RidePost.from_location.ilike(f"%{from_location}%"))
@@ -263,39 +316,71 @@ def ride_posts():
         except:
             pass
 
-    # Initial unfiltered results
+    # ❗ Only rides today or later
+    query = query.filter(RidePost.travel_date >= today)
+
+    # Initial filtered results
     all_rides = query.order_by(RidePost.created_at.desc()).all()
 
     # Matching Logic Based on User Preferences
     user_home = current_user.home_location or ""
     user_routes = current_user.frequent_routes.split(",") if current_user.frequent_routes else []
     preferred_fare = current_user.preferred_mode or ""
-    today = datetime.now(UTC).date()
 
     def match_score(ride: RidePost):
         score = 0
 
-        # Location Match (from or to matches home/frequent routes)
+        # Match by location preferences
         if user_home.lower() in ride.from_location.lower() or user_home.lower() in ride.to_location.lower():
-            score += 3
+            score += 4
         if any(route.strip().lower() in ride.from_location.lower() or route.strip().lower() in ride.to_location.lower() for route in user_routes):
-            score += 3
+            score += 4
 
         # Fare type match
         if ride.fare_type.lower() == preferred_fare.lower():
             score += 2
 
-        # Upcoming ride date match
-        if abs((ride.travel_date - today).days) <= 2:
+        # Closer to today
+        days_diff = abs((ride.travel_date - today).days)
+        score += max(0, 3 - days_diff)  # max 3 points if within 0–2 days
+
+        # Match gender preference
+        if ride.gender_preference == 'any' or ride.gender_preference == current_user.gender:
             score += 2
 
-        # Match ride time window (±1 hour of current user's past rides, skipped if no data)
+        # Verification requirement
+        if not ride.require_verification or (ride.require_verification and current_user.verified):
+            score += 1
+
         return score
 
-    # Sort rides by score (desc) + created_at as tiebreaker
-    sorted_rides = sorted(all_rides, key=lambda r: (match_score(r), r.created_at), reverse=True)
+    # Sort rides by:
+    # 1. Ride owner's average_rating (higher better)
+    # 2. Match Score (higher better)
+    # 3. Post creation time (newer better)
+    sorted_rides = sorted(
+        all_rides,
+        key=lambda r: (
+            match_score(r),
+            r.creator.average_rating if r.creator and r.creator.average_rating is not None else 0,
+            r.created_at
+        ),
+        reverse=True
+    )
+
 
     return render_template('ride_posts.html', rides=sorted_rides)
+
+@socketio.on('join')
+def on_join(data):
+    chat_id = data['chat_id']
+    join_room(chat_id)
+
+@socketio.on('leave')
+def on_leave(data):
+    chat_id = data['chat_id']
+    leave_room(chat_id)
+
 
 @app.route('/chat/<int:chat_id>/messages')
 @login_required
@@ -321,10 +406,11 @@ def get_chat_messages(chat_id):
 @app.route('/mark_messages_read', methods=['POST'])
 @login_required
 def mark_messages_read():
-    # Mark all unread messages for the current user as read by checking the chat relationships
+    # Mark only messages received by the current user (not sent by them)
     unread_messages = Message.query.join(Chat).filter(
-        (Chat.user1_id == current_user.id) | (Chat.user2_id == current_user.id),  # Check if the current user is part of the chat
-        Message.is_read == False
+        (Chat.user1_id == current_user.id) | (Chat.user2_id == current_user.id),
+        Message.is_read == False,
+        Message.sender_id != current_user.id  # 👈 Important fix
     ).all()
     
     for message in unread_messages:
@@ -333,6 +419,7 @@ def mark_messages_read():
     db.session.commit()
     
     return jsonify({'success': True})
+
 
 
 
@@ -375,7 +462,16 @@ def send_chat_message(chat_id):
     db.session.add(new_message)
     db.session.commit()
 
+    sender_name = current_user.name  # Or however you get the user name
+
+    socketio.emit('receive_message', {
+        'chat_id': chat_id,
+        'content': content,
+        'sender': current_user.name  # send real name, not 'You'
+    }, room=str(chat_id))
+
     return jsonify({'success': True})
+
 
 @app.context_processor
 def inject_recent_chats():
@@ -384,16 +480,48 @@ def inject_recent_chats():
             (Chat.user1_id == current_user.id) | (Chat.user2_id == current_user.id)
         ).order_by(Chat.created_at.desc()).limit(5).all()
 
-        # Attach the other user info
+        chat_data = []
+        unread_count = 0
+        
         for chat in recent_chats:
-            chat.other_user = chat.user2 if chat.user1_id == current_user.id else chat.user1
+            other_user = chat.user2 if chat.user1_id == current_user.id else chat.user1
+
+            # Count unread messages for this chat
+            unread_messages = Message.query.filter_by(
+                chat_id=chat.id,
+                is_read=False
+            ).filter(Message.sender_id != current_user.id).count()
+
+            if unread_messages > 0:
+                unread_count += 1  # Increase unread chats count
+
+            chat_data.append({
+                'id': chat.id,
+                'other_user': other_user,
+                'unread_messages': unread_messages
+            })
     else:
-        recent_chats = []
-    
-    return dict(recent_chats=recent_chats)
+        chat_data = []
+        unread_count = 0
 
+    return dict(recent_chats=chat_data, unread_chats_count=unread_count)
+@app.route('/chat/<int:chat_id>/mark_read', methods=['POST'])
+@login_required
+def mark_chat_messages_read(chat_id):
+    chat = Chat.query.get_or_404(chat_id)
+    if current_user.id not in [chat.user1_id, chat.user2_id]:
+        return jsonify({'error': 'Unauthorized'}), 403
 
+    unread_messages = Message.query.filter_by(
+        chat_id=chat_id,
+        is_read=False
+    ).filter(Message.sender_id != current_user.id).all()
 
+    for message in unread_messages:
+        message.is_read = True
+
+    db.session.commit()
+    return jsonify({'success': True})
 
 
 
@@ -426,6 +554,7 @@ def request_ride(ride_id):
     message = f"{current_user.name} has requested to join your ride from {ride.from_location} to {ride.to_location} on {ride.travel_date.strftime('%d %b %Y')}."
     notification = Notification(
         recipient_id=ride.creator_id,
+        recipient_type='user',
         sender_id=current_user.id,
         ride_id=ride.id,
         message=message
@@ -442,36 +571,79 @@ def request_ride(ride_id):
 @app.context_processor
 def inject_notifications():
     if current_user.is_authenticated:
-        unread_notifications = Notification.query.filter_by(recipient_id=current_user.id, is_read=False).order_by(Notification.created_at.desc()).all()
+        unread_notifications = Notification.query.filter_by(
+            recipient_id=current_user.id,
+            recipient_type='user',
+            is_read=False
+        ).order_by(Notification.created_at.desc()).all()
         return dict(unread_notifications=unread_notifications)
+
+    elif session.get('admin_logged_in') and session.get('admin_id'):
+        unread_notifications = Notification.query.filter_by(
+            recipient_id=session['admin_id'],
+            recipient_type='admin',
+            is_read=False
+        ).order_by(Notification.created_at.desc()).all()
+        return dict(unread_notifications=unread_notifications)
+
     return dict(unread_notifications=[])
 
+
+
 @app.route('/mark_notifications_read', methods=['POST'])
-@login_required
 def mark_notifications_read():
-    Notification.query.filter_by(recipient_id=current_user.id, is_read=False).update({Notification.is_read: True})
-    db.session.commit()
-    return '', 204
+    # Regular user
+    if current_user.is_authenticated:
+        Notification.query.filter_by(recipient_id=current_user.id, is_read=False).update({Notification.is_read: True})
+        db.session.commit()
+        return '', 204
+
+    # Admin
+    elif session.get('admin_logged_in') and session.get('admin_id'):
+        Notification.query.filter_by(recipient_id=session['admin_id'], is_read=False).update({Notification.is_read: True})
+        db.session.commit()
+        return '', 204
+
+    abort(403)  # Not authorized
+
 
 @app.route('/notification/<int:notif_id>/read_and_redirect')
-@login_required
 def read_and_redirect(notif_id):
     notification = Notification.query.get_or_404(notif_id)
 
-    if notification.recipient_id != current_user.id:
+    is_user = current_user.is_authenticated and current_user.id == notification.recipient_id
+    is_admin = session.get('admin_logged_in') and session.get('admin_id') == notification.recipient_id
+
+    if not (is_user or is_admin):
         abort(403)
 
     notification.is_read = True
     db.session.commit()
 
-    ride = RidePost.query.get(notification.ride_id)
+    # If the message contains a link like /ride_deleted_info/
+    if '/ride_deleted_info/' in notification.message:
+        # Extract ride_id from message
+        import re
+        match = re.search(r'/ride_deleted_info/(\d+)', notification.message)
+        if match:
+            ride_id = int(match.group(1))
+            return redirect(url_for('ride_deleted_info', ride_id=ride_id))
+        else:
+            abort(400)
 
-    # If the current user is the creator of the ride, go to request view
-    if ride and current_user.id == ride.creator_id:
+    ride = RidePost.query.get(notification.ride_id)
+    if not ride:
+        abort(404)
+
+    if 'admin_logged_in' in session and session['admin_logged_in']:
+        return redirect(url_for('view_reported_ride', ride_id=ride.id))
+
+    if notification.recipient_id == ride.creator_id:
         return redirect(url_for('view_ride_request', ride_id=ride.id, requester_id=notification.sender_id))
 
-    # Otherwise, show public ride details
     return redirect(url_for('ride_detail', ride_id=ride.id))
+
+
 
 @app.route('/ride/<int:ride_id>')
 @login_required
@@ -522,6 +694,7 @@ def handle_ride_request(ride_id, requester_id):
             message = f"Sorry, the ride from {ride.from_location} to {ride.to_location} on {ride.travel_date.strftime('%d %b %Y')} is already full."
             notification = Notification(
                 recipient_id=requester.id,
+                recipient_type='user',
                 sender_id=current_user.id,
                 ride_id=ride.id,
                 message=message
@@ -540,6 +713,7 @@ def handle_ride_request(ride_id, requester_id):
             message = f"Your request to join the ride from {ride.from_location} to {ride.to_location} on {ride.travel_date.strftime('%d %b %Y')} has been accepted."
             notification = Notification(
                 recipient_id=requester.id,
+                recipient_type='user',
                 sender_id=current_user.id,
                 ride_id=ride.id,
                 message=message
@@ -579,6 +753,224 @@ def view_profile(user_id):  # <- function name changed to avoid clash
     
     return render_template('view_profile.html', user=user, rides=user_rides)
 
+# Edit Ride Route
+@app.route('/edit_ride/<int:ride_id>', methods=['GET', 'POST'])
+@login_required
+def edit_ride(ride_id):
+    ride = RidePost.query.get_or_404(ride_id)
+    if ride.creator_id != current_user.id:
+        abort(403)
+
+    if request.method == 'POST':
+        # Update ride fields
+        ride.from_location = request.form['from_location']
+        ride.to_location = request.form['to_location']
+        ride.travel_date = request.form['travel_date']
+        ride.travel_time = request.form['travel_time']
+        ride.seats_available = request.form['seats_available']
+        ride.fare_type = request.form['fare_type']
+        ride.estimated_cost = request.form.get('estimated_cost') or None
+        ride.description = request.form['description']
+        ride.gender_preference = request.form.get('gender_preference', 'any')
+        ride.require_verification = 'require_verification' in request.form
+
+        # 🗺 Update map coordinates
+        ride.from_lat = request.form.get('from_lat')
+        ride.from_lng = request.form.get('from_lng')
+        ride.to_lat = request.form.get('to_lat')
+        ride.to_lng = request.form.get('to_lng')
+
+        db.session.commit()
+        flash('Ride updated successfully.', 'success')
+        return redirect(url_for('ride_posts'))
+
+    return render_template('edit_ride.html', ride=ride)
+
+
+# Delete Ride Route
+@app.route('/delete_ride/<int:ride_id>', methods=['POST'])
+@login_required
+def delete_ride(ride_id):
+    ride = RidePost.query.get_or_404(ride_id)
+    if ride.creator_id != current_user.id:
+        abort(403)
+    db.session.delete(ride)
+    db.session.commit()
+    flash('Ride deleted successfully.', 'success')
+    return redirect(url_for('ride_posts'))
+
+# Sharable People Route (sample implementation)
+@app.route('/sharable_people/<int:ride_id>', methods=['GET', 'POST'])
+@login_required
+def sharable_people(ride_id):
+    ride = RidePost.query.get_or_404(ride_id)
+
+    if ride.creator_id != current_user.id:
+        abort(403)
+
+    if request.method == 'POST':
+        user_id = request.form.get('user_id')
+        user = User.query.get(user_id)
+
+        if user:
+            existing_request = RideRequest.query.filter_by(ride_id=ride.id, user_id=user.id).first()
+
+            if existing_request:
+                flash(f'{user.name} is already associated with this ride.', 'warning')
+            else:
+                if ride.seats_available <= 0:
+                    flash("Cannot add user — no available seats left.", "danger")
+                else:
+                    # Add the request
+                    new_request = RideRequest(ride_id=ride.id, user_id=user.id, status='accepted')
+                    db.session.add(new_request)
+
+                    # Reduce available seats
+                    ride.seats_available -= 1
+
+                    # Send notification to user
+                    message = f"You’ve been added to a ride from {ride.from_location} to {ride.to_location} on {ride.travel_date.strftime('%d %b %Y')}."
+                    notification = Notification(
+                        recipient_id=user.id,
+                        sender_id=current_user.id,
+                        ride_id=ride.id,
+                        message=message
+                    )
+                    db.session.add(notification)
+
+                    db.session.commit()
+                    flash(f'{user.name} was added to the ride.', 'success')
+        else:
+            flash('No user found.', 'danger')
+
+    requests = RideRequest.query.filter_by(ride_id=ride_id).all()
+    return render_template('sharable_people.html', ride=ride, requests=requests)
+
+@app.route('/remove_sharable_person/<int:ride_id>/<int:user_id>', methods=['POST'])
+@login_required
+def remove_sharable_person(ride_id, user_id):
+    ride = RidePost.query.get_or_404(ride_id)
+    if ride.creator_id != current_user.id:
+        abort(403)
+
+    request_entry = RideRequest.query.filter_by(ride_id=ride_id, user_id=user_id).first()
+    if request_entry:
+        db.session.delete(request_entry)
+        ride.seats_available += 1
+        db.session.commit()
+        flash("User removed from the ride.", "success")
+    else:
+        flash("User not associated with this ride.", "warning")
+
+    return redirect(url_for('sharable_people', ride_id=ride_id))
+
+
+
+@app.route('/search_users')
+@login_required
+def search_users():
+    query = request.args.get('query', '').strip()
+    if not query:
+        return jsonify(users=[])
+    
+    users = User.query.filter(User.name.ilike(f'%{query}%')).limit(10).all()
+    result = [{'id': user.id, 'text': user.name} for user in users if user.id != current_user.id]
+    return jsonify(users=result)
+
+
+
+
+
+@app.route('/report_ride/<int:ride_id>', methods=['POST'])
+@login_required
+def report_ride(ride_id):
+    ride = RidePost.query.get_or_404(ride_id)
+
+    if ride.creator_id == current_user.id:
+        flash("You cannot report your own ride.", "warning")
+        return redirect(url_for('ride_posts'))
+
+    admins = Admin.query.all()
+
+    for admin in admins:
+        message = f"{current_user.name} has reported Ride #{ride.id}. Review it [here](/admin/reported_ride/{ride.id})"
+        notification = Notification(
+            recipient_id=admin.id,
+            recipient_type='admin',
+            sender_id=current_user.id,
+            ride_id=ride.id,
+            message=message
+        )
+        db.session.add(notification)
+
+    db.session.commit()
+    flash("Report has been sent to the admins.", "info")
+    return redirect(url_for('ride_posts'))
+
+@app.route('/admin/reported_ride/<int:ride_id>')
+def view_reported_ride(ride_id):
+    if 'admin_id' not in session:
+        flash("Access denied", "danger")
+        return redirect(url_for('ride_posts'))
+
+    ride = RidePost.query.get_or_404(ride_id)
+    return render_template("admin_reported_ride.html", ride=ride)
+
+@app.route('/admin/delete_ride/<int:ride_id>', methods=['POST'])
+def admin_delete_ride(ride_id):
+    if 'admin_id' not in session:
+        flash("Access denied", "danger")
+        return redirect(url_for('ride_posts'))
+
+    ride = RidePost.query.get_or_404(ride_id)
+    creator = ride.creator
+    participants = [req.user for req in ride.ride_requests if req.status == 'accepted']
+
+    # Step 1: Save to DeletedRide
+    deleted_ride = DeletedRide(
+        original_ride_id=ride.id,
+        creator_id=creator.id,
+        origin=ride.from_location,
+        destination=ride.to_location,
+        travel_date=ride.travel_date,
+        travel_time=ride.travel_time,
+        fare=ride.estimated_cost,
+        seats=ride.seats_available,
+        deleted_by_admin_id=session.get('admin_id')
+    )
+    db.session.add(deleted_ride)
+
+    # Step 2: Delete ride
+    db.session.delete(ride)
+    db.session.commit()
+
+    # Step 3: Notifications
+    message_link = f"/ride_deleted_info/{deleted_ride.original_ride_id}"
+    creator_note = Notification(
+        recipient_id=creator.id,
+        sender_id=session.get('admin_id'),
+        message=f"Your ride #{ride.id} was deleted by admin. [Details]({message_link})"
+    )
+    db.session.add(creator_note)
+
+    for user in participants:
+        note = Notification(
+            recipient_id=user.id,
+            sender_id=session.get('admin_id'),
+            message=f"Ride #{ride.id} you joined has been deleted by admin. [More Info]({message_link})"
+        )
+        db.session.add(note)
+
+    db.session.commit()
+    flash("Ride post deleted and all parties notified.", "success")
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/ride_deleted_info/<int:ride_id>')
+@login_required
+def ride_deleted_info(ride_id):
+    deleted_ride = DeletedRide.query.filter_by(original_ride_id=ride_id).first_or_404()
+    return render_template("ride_deleted_info.html", ride=deleted_ride)
+
 
 
 @app.route('/admin/login', methods=['GET', 'POST'])
@@ -593,11 +985,66 @@ def admin_login():
             return redirect(url_for('admin_dashboard'))
         flash("Invalid admin credentials", "danger")
     return render_template('admin_login.html')
+
+
 @app.route('/admin/dashboard')
 def admin_dashboard():
     if not session.get('admin_logged_in'):
         return redirect(url_for('admin_login'))
-    return render_template('admin_dashboard.html')
+
+    from models import User, RidePost, DeletedRide  # Adjust if needed
+
+    user_count = User.query.count()
+    ride_count = RidePost.query.count()
+    deleted_ride_count = DeletedRide.query.count()
+    rides = RidePost.query.order_by(RidePost.id.desc()).all()
+
+    return render_template('admin_dashboard.html',
+                           user_count=user_count,
+                           ride_count=ride_count,
+                           deleted_ride_count=deleted_ride_count,
+                           rides=rides)
+
+@app.route('/admin/add', methods=['GET', 'POST'])
+def add_admin():
+    if not session.get('admin_logged_in'):
+        return redirect(url_for('admin_login'))
+
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+
+        # Check if user already admin
+        existing_admin = Admin.query.filter_by(email=email).first()
+        if existing_admin:
+            flash("User is already an admin.", "warning")
+        else:
+            new_admin = Admin(email=email, password=password)  # Password should be hashed ideally
+            db.session.add(new_admin)
+            db.session.commit()
+            flash("Admin added successfully!", "success")
+        return redirect(url_for('add_admin'))
+
+    return render_template('admin_add.html')
+
+@app.route('/admin/remove', methods=['GET', 'POST'])
+def remove_admin():
+    if not session.get('admin_logged_in'):
+        return redirect(url_for('admin_login'))
+
+    admins = Admin.query.all()
+
+    if request.method == 'POST':
+        admin_id = request.form.get('admin_id')
+        admin = Admin.query.get(admin_id)
+        if admin:
+            db.session.delete(admin)
+            db.session.commit()
+            flash("Admin removed successfully.", "danger")
+        return redirect(url_for('remove_admin'))
+
+    return render_template('admin_remove.html', admins=admins)
+
 
 @app.route('/admin/users')
 def view_users():
@@ -663,4 +1110,4 @@ def logout():
     return redirect(url_for('home'))
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    socketio.run(app, debug=True)
