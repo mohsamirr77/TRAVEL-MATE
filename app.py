@@ -1,5 +1,4 @@
-import eventlet
-eventlet.monkey_patch()
+
 from flask import Flask, render_template, request, redirect, url_for, flash,abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
@@ -7,7 +6,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from models import db, User, Admin
 import config
 from flask import Flask, request, jsonify, session
-from models import db, RidePost, User, RideRequest, Feedback, Notification, ChatMessage, Chat, Message, DeletedRide
+from models import db, RidePost, User, RideRequest, Feedback, Notification, Chat, Message, DeletedRide
 from datetime import time
 import os
 from werkzeug.utils import secure_filename
@@ -15,11 +14,15 @@ from datetime import datetime, timedelta, UTC
 from sqlalchemy import or_, and_
 from flask_migrate import Migrate
 from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_mail import Mail
+from flask_mail import Message as MailMessage
+from itsdangerous import URLSafeTimedSerializer as Serializer
+from models import Message
 
 
 app = Flask(__name__)
 app.config.from_object(config)
-socketio = SocketIO(app)
+
 
 db.init_app(app)
 migrate = Migrate(app, db)
@@ -34,7 +37,10 @@ upload_path = os.path.join(app.config['UPLOAD_FOLDER'])
 if not os.path.exists(upload_path):
     os.makedirs(upload_path)
 
+mail = Mail(app)
+s = Serializer(app.config['SECRET_KEY'])
 
+socketio = SocketIO(app, async_mode='threading') # Use threading mode for SocketIO
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -62,17 +68,66 @@ def register():
         phone = request.form['phone']
         password = generate_password_hash(request.form['password'])
 
+        # Check if the email is already taken
         if User.query.filter_by(email=email).first():
             flash('Email already exists', 'warning')
             return redirect(url_for('register'))
 
+        # Create a new user
         new_user = User(name=name, email=email, phone=phone, password=password)
         db.session.add(new_user)
         db.session.commit()
-        flash('Account created! Please login.', 'success')
+
+        # Generate a token for email confirmation
+        token = s.dumps(email, salt='email-confirm')
+        confirm_url = url_for('confirm_email', token=token, _external=True)
+
+        # Render the email HTML content
+        html = render_template('verify_email.html', confirm_url=confirm_url)
+
+        # Create the email message using flask_mail.Message (renamed to MailMessage)
+        msg = MailMessage(
+            subject="Confirm your email",
+            recipients=[email],
+            html=html,
+            sender=app.config['MAIL_DEFAULT_SENDER']  # Use the default sender from config
+        )
+
+        try:
+            mail.send(msg)  # Send the email
+        except Exception as e:
+            flash(f'Error sending confirmation email: {str(e)}', 'danger')
+
+        flash('Account created! Please check your email to verify.', 'success')
         return redirect(url_for('login'))
 
     return render_template('register.html')
+
+
+
+@app.route('/confirm/<token>')
+def confirm_email(token):
+    try:
+        # Try to load the email from the token
+        email = s.loads(token, salt='email-confirm', max_age=3600)  # token expires in 1 hour
+    except:
+        flash('The confirmation link is invalid or has expired.', 'danger')
+        return redirect(url_for('login'))
+
+    # Find the user by the email decoded from the token
+    user = User.query.filter_by(email=email).first_or_404()
+
+    # Check if the user is already verified
+    if user.verified:
+        flash('Account already verified. Please login.', 'info')
+    else:
+        user.verified = True  # Mark the user as verified
+        db.session.commit()  # Save the changes
+        flash('You have confirmed your account. Thanks!', 'success')
+
+    return redirect(url_for('login'))
+
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -129,6 +184,9 @@ def dashboard():
 @app.route('/feedback/<int:ride_id>', methods=['GET', 'POST'])
 @login_required
 def give_feedback(ride_id):
+    if not current_user.verified:
+            flash("You must verify your email to perform this action.", "warning")
+            return redirect(url_for('dashboard'))
     ride = RidePost.query.get_or_404(ride_id)
 
     if request.method == 'POST':
@@ -199,8 +257,10 @@ def profile():
         current_user.phone = request.form['phone']
         current_user.preferred_mode = request.form['preferred_mode']
         current_user.address = request.form['address']
+        current_user.gender = request.form['gender']
         current_user.nid = request.form['nid']
         current_user.blood_group = request.form['blood_group']
+
 
         if 'profile_picture' in request.files:
             file = request.files['profile_picture']
@@ -247,6 +307,9 @@ def preferences():
 @app.route('/create_ride', methods=['GET', 'POST'])
 @login_required
 def create_ride():
+    if not current_user.verified:
+            flash("You must verify your email to perform this action.", "warning")
+            return redirect(url_for('dashboard'))
     if request.method == 'POST':
         from_location = request.form['from_location']
         to_location = request.form['to_location']
@@ -528,6 +591,9 @@ def mark_chat_messages_read(chat_id):
 @app.route('/request_ride/<int:ride_id>', methods=['POST'])
 @login_required
 def request_ride(ride_id):
+    if not current_user.verified:
+            flash("You must verify your email to perform this action.", "warning")
+            return redirect(url_for('ride_posts'))
     ride = RidePost.query.get_or_404(ride_id)
 
     if ride.creator_id == current_user.id:
@@ -884,6 +950,10 @@ def search_users():
 @app.route('/report_ride/<int:ride_id>', methods=['POST'])
 @login_required
 def report_ride(ride_id):
+    if not current_user.is_approved:
+        flash("You must be approved by admin to perform this action.", "warning")
+        return redirect(url_for('ride_posts'))
+
     ride = RidePost.query.get_or_404(ride_id)
 
     if ride.creator_id == current_user.id:
@@ -996,12 +1066,16 @@ def admin_dashboard():
 
     user_count = User.query.count()
     ride_count = RidePost.query.count()
+    feedback_count = Feedback.query.count()
     deleted_ride_count = DeletedRide.query.count()
     rides = RidePost.query.order_by(RidePost.id.desc()).all()
+    riderequests = RideRequest.query.all()
 
     return render_template('admin_dashboard.html',
+                           riderequests=riderequests,
                            user_count=user_count,
                            ride_count=ride_count,
+                            feedback_count=feedback_count,
                            deleted_ride_count=deleted_ride_count,
                            rides=rides)
 
@@ -1023,7 +1097,7 @@ def add_admin():
             db.session.add(new_admin)
             db.session.commit()
             flash("Admin added successfully!", "success")
-        return redirect(url_for('add_admin'))
+        return redirect(url_for('admin_dashboard'))
 
     return render_template('admin_add.html')
 

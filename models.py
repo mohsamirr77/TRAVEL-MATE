@@ -7,6 +7,7 @@ db = SQLAlchemy()
 
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    
     name = db.Column(db.String(100))
     email = db.Column(db.String(100), unique=True, nullable=False)
     phone = db.Column(db.String(20))
@@ -18,13 +19,14 @@ class User(UserMixin, db.Model):
     profile_picture = db.Column(db.String(120), default='default.jpg')
     is_approved = db.Column(db.Boolean, default=False)
     id_document = db.Column(db.String(100))
-    verified = db.Column(db.Boolean, default=False)
+    verified = db.Column(db.Boolean, default=False) #user email varification
     home_location = db.Column(db.String(255))
     frequent_routes = db.Column(db.Text)
     safety_preference = db.Column(db.String(100))
     average_rating = db.Column(db.Float, default=0.0)
     total_ratings = db.Column(db.Integer, default=0)
     gender = db.Column(db.String(10))  # male, female, other
+   
 
 class Admin(UserMixin, db.Model):
     __tablename__ = 'admins'
@@ -110,6 +112,15 @@ class ChatMessage(db.Model):
     receiver = db.relationship('User', foreign_keys=[receiver_id])
     ride = db.relationship('RidePost')
 
+
+class Message(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'), nullable=False)
+    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    is_read = db.Column(db.Boolean, default=False)
+    
 class Chat(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user1_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -124,13 +135,7 @@ class Chat(db.Model):
 
     
 
-class Message(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'), nullable=False)
-    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    content = db.Column(db.Text, nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    is_read = db.Column(db.Boolean, default=False)
+
 
 class DeletedRide(db.Model):
     id = db.Column(db.Integer, primary_key=True)
